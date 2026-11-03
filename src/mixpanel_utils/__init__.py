@@ -51,10 +51,10 @@ class MixpanelUtils(object):
 
     def __init__(
             self,
-            api_secret,
-            token=None,
             service_account_username=None,
+            service_account_password=None,
             project_id=None,
+            token=None,
             strict_import=True,
             timeout=120,
             pool_size=None,
@@ -62,13 +62,15 @@ class MixpanelUtils(object):
             max_retries=4,
             debug=False,
             residency="us",
+            data_group_id=None,
+            group_key=None,
     ):
         """Initializes the MixpanelUtils object
 
-        :param api_secret: API Secret for your project OR your Service Account
+        :param service_account_username: Username for your Service Account (REQUIRED)
+        :param service_account_password: Password/Secret for your Service Account (REQUIRED)
+        :param project_id: Project ID, required for Service Account authentication (REQUIRED)
         :param token: Project Token for your project, required for imports
-        :param service_account_username: Username for your Service Account
-        :param project_id: project id, required for Service Account authentication
         :param strict_import: When set to True (recommended), Mixpanel will validate imported events and return errors
             per event that failed. (Default value = True)
         :param timeout: Time in seconds to wait for HTTP responses
@@ -78,10 +80,10 @@ class MixpanelUtils(object):
         :param max_retries: Maximum number of times to retry when a 5xx HTTP response is received (Default value = 4)
         :param debug: Enable debug logging
         :param residency: residency for your project. Accepts "us", "eu", or "in". (Default value = "us")
-        :type api_secret: str
-        :type token: str
         :type service_account_username: str
-        :type project_id: int
+        :type service_account_password: str
+        :type project_id: int or str (numeric strings are accepted and coerced to int)
+        :type token: str
         :type strict_import: bool
         :type timeout: int
         :type pool_size: int
@@ -92,13 +94,33 @@ class MixpanelUtils(object):
 
         """
 
-        self.api_secret = api_secret
+        # Enforce Service Account authentication only - API Secret is deprecated
+        _migration_help = (
+            "API Secret authentication is deprecated and no longer supported. "
+            "You must use Service Account authentication with 'service_account_username', 'service_account_password', and 'project_id' parameters. "
+            "Please create a Service Account in your Mixpanel project settings and use those credentials instead."
+        )
+        if not isinstance(service_account_username, str) or not service_account_username:
+            raise ValueError(_migration_help)
+        if not isinstance(service_account_password, str) or not service_account_password:
+            raise ValueError(_migration_help)
+        if isinstance(project_id, float):
+            raise ValueError(_migration_help)
+        try:
+            project_id = int(project_id)
+        except (TypeError, ValueError):
+            raise ValueError(_migration_help)
+        if project_id <= 0:
+            raise ValueError(_migration_help)
+        _valid_residencies = ("us", "eu", "in")
+        if residency not in _valid_residencies:
+            raise ValueError(f"residency must be one of {_valid_residencies!r}, got {residency!r}.")
+
+        self.service_account_password = service_account_password
         self.token = token
         self.service_account_username = service_account_username
         self.project_id = project_id
         self.strict_import = strict_import
-        if self.service_account_username is not None:
-            assert self.project_id, "project_id required for Service Account authentication!"
         self.timeout = timeout
         if pool_size is None:
             # Default number of threads is system dependent
@@ -106,9 +128,9 @@ class MixpanelUtils(object):
         self.pool_size = pool_size
         self.read_pool_size = read_pool_size
         self.max_retries = max_retries
+        self.data_group_id = data_group_id
+        self.group_key = group_key
         self.residency = residency
-        residency_values = ["us","eu","in"]
-        assert self.residency in residency_values, "residency value must be 'us', 'eu, or 'in'!"
         self.raw_api = (
             "https://data.mixpanel.com/api" if residency == "us"
             else f"https://data-{residency}.mixpanel.com/api"
@@ -225,10 +247,8 @@ class MixpanelUtils(object):
                 base = [base_url, str(MixpanelUtils.VERSION)]
             request_url = "/".join(base + path_components)
 
-            if self.service_account_username:
-                basic_credentials = f"{self.service_account_username}:{self.api_secret}"
-            else:
-                basic_credentials = f"{self.api_secret}:"
+            # Service Account authentication (always required now)
+            basic_credentials = f"{self.service_account_username}:{self.service_account_password}"
             encoded_credentials = base64.b64encode(basic_credentials.encode("utf-8")).decode("utf-8")
 
             if headers is None:
@@ -236,8 +256,8 @@ class MixpanelUtils(object):
             headers["Authorization"] = f"Basic {encoded_credentials}"
 
             # Set up request url and body based on HTTP method and endpoint
-            if self.service_account_username:
-                params['project_id'] = self.project_id
+            # Always add project_id for Service Account authentication
+            params['project_id'] = self.project_id
             if method == "GET" or method == "DELETE":
                 data = None
                 request_url += "?" + MixpanelUtils._unicode_urlencode(params)
@@ -248,8 +268,8 @@ class MixpanelUtils(object):
                     query_params = {}
                     if self.strict_import:
                         query_params["strict"] = 1
-                    if self.service_account_username:
-                        query_params["project_id"] = self.project_id
+                    # Always add project_id for Service Account authentication
+                    query_params["project_id"] = self.project_id
                     if query_params:
                         request_url += "?" + MixpanelUtils._unicode_urlencode(query_params)
                 else:
@@ -381,7 +401,8 @@ class MixpanelUtils(object):
         :rtype: int
 
         """
-        assert self.token, "Project token required for People operation!"
+        if not self.token:
+            raise ValueError("Project token required for People operation!")
         if profiles is not None and query_params is not None:
             MixpanelUtils.LOGGER.error(
                 "profiles and query_params both provided, please use one or the other"
@@ -417,6 +438,94 @@ class MixpanelUtils(object):
         profile_count = len(profiles_list)
         MixpanelUtils.LOGGER.debug(
             f"{operation} operation applied to {profile_count} profiles"
+        )
+        return profile_count
+    
+    def define_group_context(self, data_group_id = None, group_key = None):
+        """Define the group context for subsequent group operations
+
+        :param data_group_id: The data_group_id for the groups you will be operating on
+        :param group_key: The property key that identifies the group, e.g. 'company_id'
+        :type data_group_id: str
+        :type group_key: str
+
+        """
+        if not data_group_id is None:
+            self.data_group_id = data_group_id
+        if not group_key is None:
+            self.group_key = group_key
+    
+    def group_operation(
+            self,
+            operation,
+            value,
+            group_profiles=None,
+            query_params=None,
+            timezone_offset=None,
+            backup=False,
+            backup_file=None,
+    ):
+        """Base method for performing any of the Group analytics update operations
+
+        https://developer.mixpanel.com/reference/group-set-property
+
+        :param operation: A string with name of a Mixpanel Group Profile operation, like $set or $delete
+        :param value: Can be a static value applied to all profiles or a user-defined function (or lambda) that takes a
+            profile as its only parameter and returns the value to use for the operation on the given profile
+        :param group_profiles: Can be a list of group profiles or the name of a file containing a JSON array or CSV of profiles.
+            Alternative to query_params. (Default value = None)
+        :param query_params: Parameters to query /engage API. Alternative to profiles param. (Default value = None) but a data_group_id is required
+        :param timezone_offset: UTC offset in hours of project timezone setting, used to calculate as_of_timestamp
+            parameter for queries that use behaviors. Required if query_params contains behaviors (Default value = None)
+        :param backup: True to create backup file otherwise False (default)
+        :param backup_file: Optional filename to use for the backup file (Default value = None)
+        :type operation: str
+        :type group_profiles: list | str
+        :type query_params: dict
+        :type timezone_offset: int | float
+        :type backup: bool
+        :type backup_file: str
+        :return: Number of profiles operated on
+        :rtype: int
+
+        """
+        if not self.token:
+            raise ValueError("Project token required for group operation!")
+        if not self.group_key:
+            raise ValueError("a group_key is required for group operation!")
+
+        if group_profiles is None and self.data_group_id is None:
+            raise RuntimeError("group operations require for groups to be provided OR a data_group_id to be defined for querying group profiles")
+
+        if group_profiles is not None:
+            profiles_list = MixpanelUtils._list_from_argument(group_profiles)
+        else: 
+            if query_params is None:
+                query_params = {}
+            query_params["data_group_id"] = self.data_group_id
+            profiles_list = self.query_engage(
+                query_params, timezone_offset=timezone_offset
+            )
+        
+        if backup:
+            if backup_file is None:
+                backup_file = "backup_{:.0f}.json".format(time.time())
+
+            self.export_data(profiles_list, backup_file, append_mode=True)
+
+        # Set the dynamic flag to True if value is a function
+        dynamic = isfunction(value)
+
+        self._dispatch_batches(
+            self.import_api,
+            "groups",
+            profiles_list,
+            [{}, self.token,self.group_key,operation, value, dynamic]
+        )
+
+        profile_count = len(profiles_list)
+        MixpanelUtils.LOGGER.debug(
+            f"{operation} operation applied to {profile_count} group profiles"
         )
         return profile_count
 
@@ -456,6 +565,42 @@ class MixpanelUtils(object):
             query_params=query_params,
             timezone_offset=timezone_offset,
             ignore_alias=ignore_alias,
+            backup=backup,
+            backup_file=backup_file,
+        )
+    
+    def group_delete(
+            self,
+            group_profiles=None,
+            query_params=None,
+            timezone_offset=None,
+            backup=True,
+            backup_file=None,
+    ):
+        """Deletes the specified Group profiles with the $delete operation and optionally creates a backup file
+
+        :param group_profiles: Can be a list of group profiles or the name of a file containing a JSON array or CSV of profiles.
+            Alternative to query_params. (Default value = None)
+        :param query_params: Parameters to query /engage API. Alternative to profiles param. (Default value = None)
+        :param timezone_offset: UTC offset in hours of project timezone setting, used to calculate as_of_timestamp
+            parameter for queries that use behaviors. Required if query_params contains behaviors (Default value = None)
+        :param backup: True to create backup file otherwise False (default)
+        :param backup_file: Optional filename to use for the backup file (Default value = None)
+        :type group_profiles: list | str
+        :type query_params: dict
+        :type timezone_offset: int | float
+        :type backup: bool
+        :type backup_file: str
+        :return: Number of profiles deleted
+        :rtype: int
+
+        """
+        return self.group_operation(
+            "$delete",
+            "",
+            group_profiles=group_profiles,
+            query_params=query_params,
+            timezone_offset=timezone_offset,
             backup=backup,
             backup_file=backup_file,
         )
@@ -499,6 +644,45 @@ class MixpanelUtils(object):
             query_params=query_params,
             timezone_offset=timezone_offset,
             ignore_alias=ignore_alias,
+            backup=backup,
+            backup_file=backup_file,
+        )
+    
+    def group_set(
+            self,
+            value,
+            group_profiles=None,
+            query_params=None,
+            timezone_offset=None,
+            backup=True,
+            backup_file=None,
+    ):
+        """Sets Group profile properties for the specified profiles using the $set operation and optionally creates a backup file
+
+        :param value: Can be a static value applied to all profiles or a user-defined function (or lambda) that takes a
+            profile as its only parameter and returns the value to use for the operation on the given profile
+        :param group_profiles: Can be a list of group profiles or the name of a file containing a JSON array or CSV of group profiles.
+            Alternative to query_params. (Default value = None)
+        :param query_params: Parameters to query /engage API. Alternative to group_profiles param. (Default value = None)
+        :param timezone_offset: UTC offset in hours of project timezone setting, used to calculate as_of_timestamp
+            parameter for queries that use behaviors. Required if query_params contains behaviors (Default value = None)
+        :param backup: True to create backup file otherwise False (default)
+        :param backup_file: Optional filename to use for the backup file (Default value = None)
+        :type group_profiles: list | str
+        :type query_params: dict
+        :type timezone_offset: int | float
+        :type backup: bool
+        :type backup_file: str
+        :return: Number of group_profiles operated on
+        :rtype: int
+
+        """
+        return self.group_operation(
+            "$set",
+            value=value,
+            group_profiles=group_profiles,
+            query_params=query_params,
+            timezone_offset=timezone_offset,
             backup=backup,
             backup_file=backup_file,
         )
@@ -1428,6 +1612,46 @@ class MixpanelUtils(object):
         MixpanelUtils.export_data(
             profiles, output_file, format=format, compress=compress
         )
+    
+    def export_groups(
+            self,
+            output_file,
+            params=None,
+            timezone_offset=None,
+            format="json",
+            compress=False,
+    ):
+        """Queries the /engage API for group profiles (instead of user profiles) and writes the Mixpanel People profile data to disk as a JSON or CSV file. Optionally
+        gzip file.
+
+        https://mixpanel.com/help/reference/data-export-api#people-analytics
+
+        requires for data_group_id to be set within as a string within a dict within params
+
+        :param output_file: Name of the file to write to
+        :param params: Parameters to use for the /engage API request (Default value = None)
+        :param timezone_offset: UTC offset in hours of project timezone setting, used to calculate as_of_timestamp
+            parameter for queries that use behaviors. Required if query_params contains behaviors (Default value = None)
+        :param format:  (Default value = 'json')
+        :param compress:  (Default value = False)
+        :type output_file: str
+        :type params: dict
+        :type timezone_offset: int | float
+        :type format: str
+        :type compress: bool
+
+        """
+        if self.data_group_id is None:
+            raise RuntimeError("data_group_id is required within init for group exports")
+        
+        if params is None:
+            params = {}
+        params["data_group_id"] = self.data_group_id
+
+        profiles = self.query_engage(params, timezone_offset=timezone_offset)
+        MixpanelUtils.export_data(
+            profiles, output_file, format=format, compress=compress
+        )
 
     def import_events(self, data, timezone_offset):
         """Imports a list of Mixpanel event dicts or a file containing a JSON array of Mixpanel events.
@@ -1464,6 +1688,30 @@ class MixpanelUtils(object):
             "engage",
             ignore_alias=ignore_alias,
             raw_record_import=raw_record_import,
+        )
+
+    def import_groups(self, data):
+        """Import a list of Mixpanel Group profile dicts 
+        :param data: A list group profile dicts
+        :type data: list | str
+        """
+        if not self.token:
+            raise ValueError("Project token required for import!")
+        if not self.group_key:
+            raise ValueError("group_key required for import!")
+
+        # Create a list of arguments to be used in one of the _prep functions later
+        args = [{}, self.token, self.group_key]
+        base_url = self.import_api
+        endpoint = "groups"
+        batch_size=2000
+        item_list = MixpanelUtils._list_from_argument(data)
+        args.extend(
+            ["$set", lambda profile: profile["$properties"], True]
+        )
+
+        self._dispatch_batches(
+            base_url, endpoint, item_list, args, batch_size=batch_size
         )
 
     def import_from_amplitude(self, amplitude_api_key, amplitude_api_secret, start, end):
@@ -1913,6 +2161,57 @@ class MixpanelUtils(object):
                 return
 
         return params
+    
+    @staticmethod
+    def _prep_params_for_group_profile(
+            profile, token, group_key, operation, value, dynamic
+    ):
+        """Takes a Group profile dict and returns the parameters for an /engage API update
+
+        :param profile: A Mixpanel Group profile dict
+        :param token: A Mixpanel project token
+        :param operation: A Mixpanel /engage API update operation
+            https://mixpanel.com/help/reference/http#update-operations
+        :param value: The value to use for the operation or a function that takes a Group profile and returns the value
+            to use
+        :param ignore_alias: Option to bypass Mixpanel's alias lookup table
+        :param dynamic: Should be set to True if value param is a function, otherwise false.
+        :type profile: dict
+        :type token: str
+        :type value: dict | list | str | (profile) -> dict | (profile) -> list
+        :type operation: str
+        :type dynamic: bool
+        :return: Parameters for a Mixpanel /engage API update
+        :rtype: dict
+
+        """
+        # We use a dynamic flag parameter to avoid the overhead of checking the value parameter's type every time
+        if dynamic:
+            op_value = value(profile)
+        else:
+            op_value = value
+
+        params = {
+            "$ignore_time": True,
+            "$ip": 0,
+            "$token": token,
+            "$group_key": group_key,
+            operation: op_value,
+        }
+
+        try:
+            params["$group_id"] = profile["$distinct_id"]
+        except KeyError:
+            try:
+                # If there's no $distinct_id, look for distinct_id instead (could be JQL data)
+                params["$group_id"] = profile["distinct_id"]
+            except KeyError:
+                MixpanelUtils.LOGGER.warning(
+                    "group profile object does not contain a distinct id, skipping."
+                )
+                return
+
+        return params
 
     @staticmethod
     def _dt_from_iso(profile):
@@ -2008,9 +2307,11 @@ class MixpanelUtils(object):
             prep_function = MixpanelUtils._prep_event_for_import
         elif endpoint == "engage" or endpoint == "import-people":
             prep_function = MixpanelUtils._prep_params_for_profile
+        elif endpoint == "groups":
+            prep_function = MixpanelUtils._prep_params_for_group_profile
         else:
             MixpanelUtils.LOGGER.error(
-                f'endpoint must be "import", "engage", "import-events" or "import-people", found: {endpoint}'
+                f'endpoint must be "import", "engage", "groups", "import-events" or "import-people", found: {endpoint}'
             )
             return
 
@@ -2109,7 +2410,8 @@ class MixpanelUtils(object):
         :type raw_record_import: bool
 
         """
-        assert self.token, "Project token required for import!"
+        if not self.token:
+            raise ValueError("Project token required for import!")
 
         # Create a list of arguments to be used in one of the _prep functions later
         args = [{}, self.token]

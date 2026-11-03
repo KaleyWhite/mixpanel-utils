@@ -2,13 +2,24 @@ from mixpanel_utils import MixpanelUtils
 
 if __name__ == '__main__':
 	credentials = {
-		'API_secret': '',
+		'service_account_username': '',
+		'service_account_password': '',
+		'project_id': 1234567,  # must be a positive int Mixpanel project ID
 		'token': '',
+	}
+	# Optional group context
+	group_context = {
+		'data_group_id': '',
+		'group_key': '',
 	}
 
 	# first we are going to make a Mixpanel object instance
 	# if you want more information output when running commands set debug=True here
-	m = MixpanelUtils(credentials['API_secret'])
+	m = MixpanelUtils(
+		service_account_username=credentials['service_account_username'],
+		service_account_password=credentials['service_account_password'],
+		project_id=credentials['project_id']
+	)
 
 	# we'll export as JSON first
 	m.export_events('test_event_export.txt',{'from_date':'2017-01-01','to_date':'2017-01-01','event':'["App Store Rating"]'})
@@ -49,7 +60,12 @@ if __name__ == '__main__':
 
 
 	# now let's import these events and people into a test project
-	i = MixpanelUtils(credentials['API_secret'],credentials['token'])
+	i = MixpanelUtils(
+		service_account_username=credentials['service_account_username'],
+		service_account_password=credentials['service_account_password'],
+		project_id=credentials['project_id'],
+		token=credentials['token']
+	)
 
 	# let's import the JSON events first
 	# you need to supply a timezone_offset here as well if you did not supply a timezone_offset in the event export
@@ -108,6 +124,27 @@ if __name__ == '__main__':
 	# so we will be adding a people property
 	i.event_counts_to_people('2017-07-01',['App Install','App Open'])
 
+
+	# now let's do some group operations
+	# first we setup the group context; 
+	# group_key is required for importing data
+	# data_group_id is required for exporting data
+	i.define_group_context(data_group_id=group_context['data_group_id'], group_key=group_context['group_key'])
+
+	# now let's import some groups
+	i.import_groups('test_group_import.json')
+
+	# let's download update groups that have the "business" plan to "enterprise"
+	# we can pass a query param to download the group profiles that we want to update
+	i.group_set({'plan':'enterprise'}, query_params={'where': 'properties["plan"] == "business"'})
+
+	#let's also export group profiles in the "growth" plan
+	i.export_groups('test_group_export.json', query_params={'where': 'properties["plan"] == "growth"'})
+
+	# delete group profiles not updated since Jan 1, 2025
+	i.group_delete(query_params={
+    	"where": 'properties["updated_at"] < datetime("2025-01-01")'
+	},backup_file=f'backup_deleted_groups.json')
 
 	# lastly we can even query JQL via the mixpanel api module
 	# this is as easy as writing your JQL query and receiving an array of results in return
